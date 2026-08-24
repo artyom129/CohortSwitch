@@ -1,0 +1,1 @@
+"""CohortSwitch application."""

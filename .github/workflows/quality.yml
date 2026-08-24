@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-and-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cohortswitch
+          POSTGRES_USER: cohortswitch
+          POSTGRES_PASSWORD: cohortswitch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cohortswitch -d cohortswitch"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      COHORTSWITCH_APP_ENV: test
+      COHORTSWITCH_DATABASE_URL: postgresql+asyncpg://cohortswitch:cohortswitch@localhost:5432/cohortswitch
+      COHORTSWITCH_REDIS_URL: redis://localhost:6379/0
+      COHORTSWITCH_JWT_SECRET: ci-secret-that-is-longer-than-thirty-two-characters
+      COHORTSWITCH_TRUSTED_HOSTS: '["testserver","localhost","127.0.0.1"]'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e ".[dev]" -e sdk/python
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Migrate
+        run: alembic -c backend/alembic.ini upgrade head
+      - name: Test
+        run: pytest --cov-fail-under=65
+      - name: Build Python SDK
+        run: python -m build sdk/python
+      - name: Validate Compose
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+

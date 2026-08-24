@@ -1,0 +1,8 @@
+target-version = "py312"
+line-length = 100
+exclude = ["scheduler.py"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "RUF"]
+ignore = ["B008", "S101", "S105"]
+

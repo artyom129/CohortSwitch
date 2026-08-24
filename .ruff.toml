@@ -1,0 +1,15 @@
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+  "backend/alembic/versions",
+  "backend/app/scheduler.py",
+  "sdk/python/src/cohortswitch/client.py",
+]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "SIM", "RUF"]
+ignore = ["B008", "S101"]
+
+[lint.per-file-ignores]
+"backend/tests/**" = ["S105", "S106"]
+
