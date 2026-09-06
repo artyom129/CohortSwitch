@@ -8,15 +8,11 @@ Feature management sits at an interesting boundary: configuration writes must be
 
 ## Engineering highlights
 
-- Gradual percentage rollouts
-- User and tenant targeting
-- Low-latency flag evaluation
-- Bucket-stable deterministic hashing
-- Audit history for every change
-- Hot configuration updates
-- Rollback and kill-switch support
-- API and Python SDK
-- Metrics and rollout observability
+- Versioned gradual rollouts with percentage targeting, rollback, and kill switches
+- Low-latency evaluation with bucket-stable deterministic hashing
+- Organization-, tenant-, and user-level targeting rules
+- Near-real-time configuration updates with full audit history
+- Extensible API and Python SDK with rollout metrics and observability
 
 ## Architecture
 
