@@ -1,3 +1,5 @@
+**English** | [Русский](README_RU.md)
+
 # CohortSwitch
 
 CohortSwitch is a self-hosted feature flag and progressive rollout platform for backend applications. It combines a deterministic evaluation engine, a transactional control plane, Redis-accelerated configuration delivery, and a small async Python SDK.
