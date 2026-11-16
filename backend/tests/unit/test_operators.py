@@ -34,3 +34,11 @@ def test_operators(operator: str, actual: object, expected: object, result: bool
 def test_unknown_operator_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unsupported operator"):
         condition_matches("unknown", "a", "a")
+
+
+def test_in_means_list_membership_not_substring() -> None:
+    assert condition_matches("in", "us", ["us", "ca"]) is True
+    assert condition_matches("in", "us", "russia") is False
+    assert condition_matches("not_in", "us", "russia") is False
+    assert condition_matches("in", ["a"], [["a"]]) is True
+    assert condition_matches("in", {"a": 1}, ["x"]) is False

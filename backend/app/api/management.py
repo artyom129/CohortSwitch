@@ -30,6 +30,7 @@ from backend.app.api.schemas import (
     ProjectResponse,
     RuleCreate,
     ScheduledChangeCreate,
+    ScheduledChangeResponse,
     VersionResponse,
 )
 from backend.app.core.errors import APIError
@@ -431,13 +432,24 @@ async def schedule_change(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     config = await get_config_by_flag_environment(session, flag_id, payload.environment_id)
-    await authorize_project(session, principal, config.flag.project_id, Permission.FLAG_WRITE)
+    project, _ = await authorize_project(
+        session, principal, config.flag.project_id, Permission.FLAG_WRITE
+    )
     if config.current_version != payload.expected_version:
         raise APIError(
             409,
             "configuration_conflict",
             "The flag configuration was changed by another writer.",
             details={"current_version": config.current_version},
+        )
+    known = {item.key for item in config.variations}
+    unknown = sorted(payload.referenced_variations() - known)
+    if unknown:
+        raise APIError(
+            422,
+            "unknown_variation",
+            "The scheduled change refers to variations this flag does not have.",
+            details={"variations": unknown},
         )
     scheduled = ScheduledChange(
         config_id=config.id,
@@ -450,7 +462,7 @@ async def schedule_change(
     await session.flush()
     record_audit(
         session,
-        organization_id=config.flag.project.organization_id,
+        organization_id=project.organization_id,
         action="flag.change_scheduled",
         resource_type="scheduled_change",
         resource_id=scheduled.id,
@@ -464,6 +476,23 @@ async def schedule_change(
     )
     await session.commit()
     return {"id": str(scheduled.id), "status": "scheduled"}
+
+
+@router.get("/flags/{flag_id}/scheduled-changes", response_model=list[ScheduledChangeResponse])
+async def list_scheduled_changes(
+    flag_id: UUID,
+    environment_id: UUID,
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> list[ScheduledChange]:
+    config = await get_config_by_flag_environment(session, flag_id, environment_id)
+    await authorize_project(session, principal, config.flag.project_id, Permission.FLAG_READ)
+    result = await session.scalars(
+        select(ScheduledChange)
+        .where(ScheduledChange.config_id == config.id)
+        .order_by(ScheduledChange.activate_at.desc())
+    )
+    return list(result.all())
 
 
 async def _create_key_endpoint(

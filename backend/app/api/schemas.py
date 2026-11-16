@@ -220,6 +220,45 @@ class ScheduledChangeCreate(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     activate_at: datetime
 
+    @field_validator("activate_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("activate_at must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def check_payload(self) -> "ScheduledChangeCreate":
+        data = self.payload
+        if self.change_type == "variation" and (
+            not isinstance(data.get("variation"), str) or not data["variation"]
+        ):
+            raise ValueError("payload.variation is required for a variation change")
+        if self.change_type == "rollout_percentage":
+            percentage = data.get("percentage_basis_points")
+            if type(percentage) is not int or not 0 <= percentage <= 10_000:
+                raise ValueError("payload.percentage_basis_points must be an integer 0..10000")
+            for key in ("variation", "fallback_variation"):
+                if not isinstance(data.get(key), str) or not data[key]:
+                    raise ValueError(f"payload.{key} is required for a rollout change")
+        return self
+
+    def referenced_variations(self) -> set[str]:
+        keys = ("variation", "fallback_variation")
+        return {str(self.payload[key]) for key in keys if key in self.payload}
+
+
+class ScheduledChangeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    change_type: str
+    payload: dict[str, Any]
+    activate_at: datetime
+    applied_at: datetime | None
+    failed_at: datetime | None
+    last_error: str | None
+
 
 class APIKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)

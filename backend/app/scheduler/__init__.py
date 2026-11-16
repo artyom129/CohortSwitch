@@ -58,6 +58,54 @@ def _apply_payload(change: ScheduledChange, update_payload: Any) -> tuple[str, s
     raise ValueError(f"Unsupported scheduled change type: {change.change_type}")
 
 
+def _describe(exc: Exception) -> str:
+    message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+    return f"{type(exc).__name__}: {message}"
+
+
+async def _apply_change(
+    session: Any, change: ScheduledChange
+) -> tuple[Any, Any, str, str, int, int] | None:
+    config_row = await session.get(FlagConfig, change.config_id)
+    if not config_row:
+        change.applied_at = datetime.now(UTC)
+        return None
+    config = await get_config_by_flag_environment(
+        session, config_row.flag_id, config_row.environment_id
+    )
+    project = await session.get(Project, config.flag.project_id)
+    if not project:
+        change.applied_at = datetime.now(UTC)
+        return None
+    compiled = compile_configuration(config)
+    update_payload = _update_from_configuration(
+        compiled, config.environment_id, config.current_version
+    )
+    audit_action, event = _apply_payload(change, update_payload)
+    previous_revision = config.environment.revision
+    result = await update_flag(
+        session,
+        flag=config.flag,
+        environment=config.environment,
+        project=project,
+        payload=update_payload,
+        actor_user_id=change.created_by_id,
+        actor_api_key_id=None,
+        request_id=None,
+        action=audit_action,
+    )
+    config.environment.revision = previous_revision + 1
+    change.applied_at = datetime.now(UTC)
+    return (
+        project.id,
+        config.environment_id,
+        config.flag.key,
+        event,
+        result.current_version,
+        config.environment.revision,
+    )
+
+
 async def apply_due_changes() -> int:
     notifications: list[tuple[Any, Any, str, str, int, int]] = []
     async with SessionFactory() as session, session.begin():
@@ -65,6 +113,7 @@ async def apply_due_changes() -> int:
             select(ScheduledChange)
             .where(
                 ScheduledChange.applied_at.is_(None),
+                ScheduledChange.failed_at.is_(None),
                 ScheduledChange.activate_at <= datetime.now(UTC),
             )
             .order_by(ScheduledChange.activate_at)
@@ -72,46 +121,23 @@ async def apply_due_changes() -> int:
             .with_for_update(skip_locked=True)
         )
         for change in rows.all():
-            config_row = await session.get(FlagConfig, change.config_id)
-            if not config_row:
-                change.applied_at = datetime.now(UTC)
-                continue
-            config = await get_config_by_flag_environment(
-                session, config_row.flag_id, config_row.environment_id
-            )
-            project = await session.get(Project, config.flag.project_id)
-            if not project:
-                change.applied_at = datetime.now(UTC)
-                continue
-            compiled = compile_configuration(config)
-            update_payload = _update_from_configuration(
-                compiled, config.environment_id, config.current_version
-            )
-            audit_action, event = _apply_payload(change, update_payload)
-            previous_revision = config.environment.revision
-            result = await update_flag(
-                session,
-                flag=config.flag,
-                environment=config.environment,
-                project=project,
-                payload=update_payload,
-                actor_user_id=change.created_by_id,
-                actor_api_key_id=None,
-                request_id=None,
-                action=audit_action,
-            )
-            config.environment.revision = previous_revision + 1
-            change.applied_at = datetime.now(UTC)
-            notifications.append(
-                (
-                    project.id,
-                    config.environment_id,
-                    config.flag.key,
-                    event,
-                    result.current_version,
-                    config.environment.revision,
+            # Each change gets its own savepoint. A change that can no longer be
+            # applied (for example its variation was deleted) is marked failed
+            # instead of rolling back the batch and blocking every later change.
+            try:
+                async with session.begin_nested():
+                    notification = await _apply_change(session, change)
+            except Exception as exc:
+                change.failed_at = datetime.now(UTC)
+                change.last_error = _describe(exc)[:1000]
+                await logger.warning(
+                    "scheduled_change_failed",
+                    change_id=str(change.id),
+                    error=change.last_error,
                 )
-            )
+                continue
+            if notification:
+                notifications.append(notification)
     for project_id, environment_id, flag_key, event, version, revision in notifications:
         await invalidate_and_publish(
             redis_client,

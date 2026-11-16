@@ -317,6 +317,8 @@ class ScheduledChange(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE)
     activate_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
     created_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 

@@ -1,18 +1,35 @@
+<div align="center">
+
 # CohortSwitch
 
-CohortSwitch is a self-hosted feature flag and progressive rollout platform for backend applications. It combines a deterministic evaluation engine, a transactional control plane, Redis-accelerated configuration delivery, and a small async Python SDK.
+**Self-hosted feature flags and progressive rollouts for backend teams.**
 
-## Why this project
+Ship behind a flag, roll out to 5% of users, watch the metrics, go to 100% or kill it in one call.
 
-Feature management sits at an interesting boundary: configuration writes must be strongly consistent and auditable, while evaluation reads must be fast, deterministic, and resilient to cache failure. CohortSwitch explores that boundary as an infrastructure product rather than a generic CRUD service.
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.140-009688?logo=fastapi&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-52%20unit%20%2B%204%20integration-2f7d4f)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## Engineering highlights
+**English** · [Русский](README.ru.md) · [Қазақша](README.kk.md)
 
-- Versioned gradual rollouts with percentage targeting, rollback, and kill switches
-- Low-latency evaluation with bucket-stable deterministic hashing
-- Organization-, tenant-, and user-level targeting rules
-- Near-real-time configuration updates with full audit history
-- Extensible API and Python SDK with rollout metrics and observability
+</div>
+
+## What it is
+
+CohortSwitch is a feature flag service you run yourself. Writes go to PostgreSQL in one transaction with a version snapshot and an audit event. Reads are served from Redis and fall back to PostgreSQL when Redis is down, so a cache outage never turns flags off. The evaluation engine is pure Python with no I/O, which makes every decision reproducible and easy to test.
+
+| | |
+|---|---|
+| **Targeting** | Ordered rules with AND conditions on any attribute: equality, lists, prefixes, numbers, semantic versions |
+| **Rollouts** | Percentage rollouts with 0.01% precision, sticky per user, and time-based progressive stages |
+| **Safety** | Kill switch checked before any rule, optimistic locking on every write, rollback to any version |
+| **Scheduling** | Enable, disable, change the variation or the rollout percentage at a set time |
+| **Delivery** | REST API, batch evaluation, ETag config snapshots, live updates over SSE, async Python SDK |
+| **Operations** | Prometheus metrics, structured logs with request IDs, readiness that reports Redis loss as degraded |
+| **Access** | Organizations, projects, environments, roles; SDK and management keys hashed at rest and scoped |
 
 ## Architecture
 
@@ -26,59 +43,66 @@ flowchart LR
     Eval --> Redis
     Eval -. "cache miss / outage" .-> PG
     Redis --> SSE["SSE config stream"]
-    Scheduler["Durable change scheduler"] --> PG
+    Scheduler["Scheduled changes worker"] --> PG
     Scheduler -. "publish" .-> Redis
     Eval --> Metrics["Prometheus metrics"]
 ```
 
-PostgreSQL is the source of truth. A flag write, immutable version snapshot, environment revision increment, and audit event are committed in one transaction. Redis stores short-lived compiled configurations, rate-limit counters, and Pub/Sub fan-out; it is never authoritative.
+PostgreSQL is the source of truth. A flag write, its immutable version snapshot, the environment revision and the audit event commit together. Redis holds short-lived compiled configurations, rate-limit counters and Pub/Sub fan-out, and is never authoritative. More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-More detail is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## How a flag is evaluated
 
-## Core concepts
-
-- An organization contains projects and role-based memberships.
-- A project contains independently revisioned environments.
-- A feature flag has an immutable key and one configuration per environment.
-- Variations carry BOOLEAN, STRING, INTEGER, or JSON values.
-- Ordered targeting rules use AND conditions and return a variation or start a rollout.
-- Every configuration mutation creates a linear, immutable version snapshot.
-- SDK and management API keys are hashed at rest and have separate scopes.
-
-## Feature evaluation flow
-
-1. Authenticate the environment-scoped SDK key.
-2. Load the compiled flag from Redis, falling back to PostgreSQL on a miss or Redis failure.
-3. Apply the kill switch before any rule.
-4. Evaluate enabled rules by ascending priority; every condition in a rule must match.
-5. Return a direct variation, a deterministic rollout allocation, or the default variation.
-6. Emit bounded-cardinality Prometheus metrics without subject identifiers or attributes.
-
-The pure engine has no HTTP, database, Redis, or global mutable-state dependency. See [docs/EVALUATION.md](docs/EVALUATION.md).
-
-## Deterministic rollout
-
-The evaluator hashes a length-prefixed tuple of namespace, project ID, environment ID, flag key, subject key, and per-configuration salt with BLAKE2b. The first 64 bits map to a bucket from `0` through `9999`, providing 0.01% precision. Cumulative bucket boundaries make rollout growth monotonic: subjects in the first 5% remain included when the rollout grows to 10% or 20%.
-
-## Rule engine
-
-Rules are ordered by priority and use AND semantics. Supported operators are `equals`, `not_equals`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `exists`, `not_exists`, numeric comparisons, and semantic-version comparisons. The first matching rule wins.
-
-## Configuration versioning
-
-Clients send `expected_version` with configuration writes. The service performs an atomic `UPDATE ... WHERE current_version = expected_version`; a stale writer receives `409 configuration_conflict`. A successful write replaces the normalized configuration, appends a snapshot, increments the environment revision, and writes an audit event in the same transaction.
-
-Rollback copies an earlier snapshot into a new version. Rolling v17 back to v12 therefore creates v18 rather than moving a pointer backward.
-
-## Cache strategy
-
-Compiled flag configurations use short-TTL Redis keys:
-
-```text
-cohortswitch:config:{project_id}:{environment_id}:{flag_key}
+```mermaid
+flowchart TD
+    K["SDK key"] --> C["Compiled flag: Redis, else PostgreSQL"]
+    C --> D{"Flag enabled?"}
+    D -->|no| OFF["Default variation, reason flag_disabled"]
+    D -->|yes| R["Rules by priority, all conditions must match"]
+    R -->|match| V["Rule variation, rollout or progressive stage"]
+    R -->|no match| F["Flag rollout, progressive stage or default"]
 ```
 
-Writers commit PostgreSQL first, then invalidate the stable cache key and publish an SSE event. If invalidation fails, the bounded TTL limits staleness. Evaluation fails over to PostgreSQL when Redis is unavailable. The consistency trade-offs are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/RELIABILITY.md](docs/RELIABILITY.md).
+Every result carries the reason (`flag_disabled`, `targeting_match`, `percentage_rollout`, `progressive_rollout`, `default`), the matched rule and the config version, so you can always answer "why did this user get this value". Details in [docs/EVALUATION.md](docs/EVALUATION.md).
+
+### Sticky rollouts
+
+The bucket is a BLAKE2b hash of the namespace, project, environment, flag key, subject key and a per-flag salt, mapped to `0..9999`. Boundaries are cumulative, so users inside 5% stay inside when the rollout grows to 10% and 20%. The same user gets the same answer on every server and after every restart.
+
+### Operators
+
+`equals`, `not_equals`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `exists`, `not_exists`, `greater_than`, `greater_or_equal`, `less_than`, `less_or_equal`, `semver_equal`, `semver_greater`, `semver_less`. A rule matches when all its conditions match; the first matching rule wins. `in` and `not_in` take a list: `{"attribute": "country", "operator": "in", "value": ["KZ", "UZ"]}`.
+
+## What is new in this version
+
+| What | How it works now |
+|---|---|
+| Scheduled changes are isolated | Each due change is applied in its own savepoint. A change that can no longer be applied is marked `failed_at` with the reason, and the rest of the batch goes through. |
+| Scheduled changes are checked up front | The payload is validated when the change is created: a rollout needs a percentage from 0 to 10000 and both variations, `activate_at` must carry a time zone, and every variation must exist on the flag. |
+| Scheduled change history | `GET /api/v1/flags/{flag_id}/scheduled-changes` lists pending, applied and failed changes with the error text. |
+| List membership | `in` and `not_in` compare against a list of values. A string value no longer matches by substring, so `"us"` is not "in" `"russia"`. |
+| Migration | `0002` adds `failed_at` and `last_error` to `scheduled_changes`. |
+
+## Quick start
+
+Requirements: Docker with Compose.
+
+```bash
+cp .env.example .env      # set COHORTSWITCH_JWT_SECRET
+docker compose up --build
+curl http://localhost:8000/health/ready
+```
+
+Compose waits for PostgreSQL, applies migrations and starts the API and the scheduler. OpenAPI is at `/docs`.
+
+Local development on Python 3.12:
+
+```bash
+python -m venv .venv
+python -m pip install -e ".[dev]" -e sdk/python
+alembic -c backend/alembic.ini upgrade head
+uvicorn backend.app.main:app --reload
+python -m backend.app.scheduler       # scheduled changes worker
+```
 
 ## Python SDK
 
@@ -97,22 +121,20 @@ async with CohortSwitchClient(
     )
 ```
 
-`evaluate()` returns a typed result. `is_enabled()` enforces a boolean value, `get_value()` returns any supported variation, and `evaluate_batch()` evaluates up to 100 flags in one request. Timeouts, network failures, and API errors become `CohortSwitchError` instances.
+`evaluate()` returns a typed result, `is_enabled()` insists on a boolean, `get_value()` returns any variation and `evaluate_batch()` handles up to 100 flags per call. Timeouts, network and API errors become `CohortSwitchError`.
 
 ## API examples
 
-Create a flag after registering, creating an organization, project, and environment:
+Create a flag with a 5% rollout:
 
 ```http
 POST /api/v1/projects/{project_id}/flags
 Authorization: Bearer {access_token}
-Content-Type: application/json
 
 {
-  "environment_id": "00000000-0000-0000-0000-000000000000",
+  "environment_id": "…",
   "key": "new_checkout",
   "name": "New checkout",
-  "description": "Enable the redesigned checkout",
   "flag_type": "BOOLEAN",
   "enabled": true,
   "default_variation": "disabled",
@@ -127,106 +149,94 @@ Content-Type: application/json
 }
 ```
 
-Evaluate it with the one-time SDK key returned by `POST /api/v1/sdk-keys`:
+Raise it to 25% tomorrow at 09:00 UTC:
+
+```http
+POST /api/v1/flags/{flag_id}/scheduled-changes
+Authorization: Bearer {access_token}
+
+{
+  "environment_id": "…",
+  "expected_version": 1,
+  "change_type": "rollout_percentage",
+  "activate_at": "2026-11-17T09:00:00Z",
+  "payload": {"percentage_basis_points": 2500, "variation": "enabled", "fallback_variation": "disabled"}
+}
+```
+
+Evaluate it with the SDK key returned once by `POST /api/v1/sdk-keys`:
 
 ```http
 POST /api/v1/evaluate
 X-CohortSwitch-Key: cs_sdk_live_...
-Content-Type: application/json
 
-{
-  "flag_key": "new_checkout",
-  "subject_key": "user_42",
-  "attributes": {"country": "KZ"}
-}
+{"flag_key": "new_checkout", "subject_key": "user_42", "attributes": {"country": "KZ"}}
 ```
 
-OpenAPI is available at `/docs` after startup.
+## Versions and conflicts
+
+Writes send `expected_version`. The update is `UPDATE … WHERE current_version = expected_version`, and a stale writer gets `409 configuration_conflict` with the current version. Rollback copies an old snapshot into a new version: rolling v17 back to v12 creates v18, so history is never rewritten.
 
 ## Observability
 
-- `GET /health/live` checks process liveness.
-- `GET /health/ready` checks PostgreSQL and reports Redis loss as degraded, not unavailable, because evaluation can fall back to PostgreSQL.
-- `GET /metrics` exposes HTTP latency, request totals, evaluation decisions, and cache outcomes.
-- Structured JSON request logs include request ID, normalized route, status, and duration; they exclude credentials and evaluation attributes.
-- Every response returns `X-Request-ID`, and sensitive changes copy it into the audit event.
+| Endpoint | What it shows |
+|---|---|
+| `GET /health/live` | The process is up |
+| `GET /health/ready` | PostgreSQL is reachable; Redis loss is reported as degraded |
+| `GET /metrics` | HTTP latency and totals, evaluation decisions by reason, cache hits and misses |
 
-## Security decisions
+Logs are JSON with request ID, route, status and duration, and never include credentials or evaluation attributes. Every response returns `X-Request-ID`, and audit events keep it.
 
-Passwords use Argon2. Refresh tokens are opaque, rotating, hashed at rest, and reuse revokes the remaining token family. SDK and management keys are generated with a cryptographically secure RNG, stored only as SHA-256 hashes, and shown once. Tenant checks precede resource disclosure, RBAC permissions are centralized, and SDK keys cannot call management endpoints. See [docs/SECURITY.md](docs/SECURITY.md).
+## Security
 
-## Quick start
-
-Requirements: Docker with Compose.
-
-```bash
-cp .env.example .env
-```
-
-Replace `COHORTSWITCH_JWT_SECRET`, then run:
-
-```bash
-docker compose up --build
-```
-
-Compose waits for PostgreSQL, applies Alembic migrations, then starts the API and durable scheduler. Verify:
-
-```bash
-curl http://localhost:8000/health/ready
-```
-
-For local development with Python 3.12:
-
-```bash
-python -m venv .venv
-python -m pip install -e ".[dev]" -e sdk/python
-alembic -c backend/alembic.ini upgrade head
-uvicorn backend.app.main:app --reload
-```
+Passwords use Argon2. Refresh tokens are opaque, rotate on use and are hashed at rest; reusing one revokes the whole family. SDK and management keys come from a secure RNG, are stored as SHA-256 hashes and are shown once. Tenant checks happen before anything is disclosed, permissions live in one place, and SDK keys cannot call management endpoints. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Tests
 
 ```bash
-ruff check .
-ruff format --check .
-pytest
+ruff check . && ruff format --check .
+pytest -m "not integration"          # 52 tests, no services needed
+pytest                               # adds 4 integration tests on PostgreSQL and Redis
 python -m build sdk/python
-docker compose config --quiet
 ```
 
-Unit coverage exercises operators, rule ordering, strict flag types, progressive stages, kill-switch priority, cross-process hashing stability, monotonic rollout growth, and a deterministic 10,000-subject distribution check. Integration coverage exercises the real PostgreSQL and Redis path, version conflicts, rollback, cache fallback, ETag, audit, API-key boundaries, SSE, and SDK calls.
+Unit tests cover operators, rule order, strict flag types, progressive stages, kill-switch priority, hash stability across processes, monotonic rollout growth and a 10,000-subject distribution check. Smoke tests run the full HTTP path on in-memory SQLite, including scheduled changes. Integration tests use real PostgreSQL and Redis for conflicts, rollback, cache fallback, ETag, audit, key boundaries, SSE and the SDK. CI runs all of them.
 
-## Project structure
+## Project layout
 
 ```text
 backend/app/
-├── api/          HTTP transport, authentication dependencies, and schemas
+├── api/          HTTP routes, auth dependencies, schemas
 ├── core/         settings, security, middleware, permissions, metrics, Redis
-├── database/     SQLAlchemy 2.x models and async session factory
-├── evaluation/   pure operators, models, hashing, and decision engine
-└── services/     transactions, compilation, cache, keys, and audit
-backend/alembic/  explicit database migrations
-backend/tests/    unit and integration tests
-sdk/python/       independently buildable async SDK
-docs/             architecture, evaluation, security, and reliability notes
+├── database/     SQLAlchemy 2 models and async sessions
+├── evaluation/   pure operators, models, hashing and decision engine
+├── scheduler/    scheduled changes worker
+└── services/     transactions, compilation, cache, keys, audit
+backend/alembic/  migrations
+backend/tests/    unit, smoke and integration tests
+sdk/python/       async SDK, built separately
+docs/             architecture, evaluation, security, reliability
 ```
 
 ## Design trade-offs
 
-- Cache invalidation uses commit-then-delete plus a short TTL instead of a transactional outbox. This leaves a bounded stale window if the process dies after commit, while keeping CohortSwitch focused on evaluation correctness rather than queue infrastructure.
-- Progressive stages are resolved from wall-clock time during evaluation, so planned percentage growth does not require a scheduler. Explicit scheduled mutations use a PostgreSQL-backed polling worker with row locking.
-- Rate limiting uses Redis for global counters and a bounded per-process fallback during Redis failure. Availability is preserved at the cost of temporarily approximate global limits.
-- SSE is intentionally non-durable. Environment revision and ETag snapshots are the recovery protocol after disconnect.
-- Evaluation metrics omit subject keys and arbitrary attributes; variation and reason labels remain bounded by configuration.
+- Cache invalidation is commit-then-delete with a short TTL rather than a transactional outbox. If the process dies right after commit, the stale window is bounded by the TTL.
+- Progressive stages are resolved from the clock at evaluation time, so planned growth needs no worker. Explicit scheduled changes use a PostgreSQL-backed poller with row locks.
+- Rate limits use Redis counters with a per-process fallback during a Redis outage: availability first, global limits approximate for a while.
+- SSE is not durable. After a disconnect the client recovers from the environment revision and the ETag snapshot.
+- Metrics never carry subject keys or attributes; variation and reason labels are bounded by configuration.
 
 ## Roadmap
 
 - Signed offline configuration bundles
 - Experiment exposure export with privacy-safe sampling
 - Approval policies for production changes
-- Additional server-side SDKs
+- More server-side SDKs
+
+## Author
+
+Built by [Koncha Artyom](https://github.com/artyom129). Open to freelance backend and infrastructure work.
 
 ## License
 
 [MIT](LICENSE)
-

@@ -9,7 +9,7 @@ description = "Self-hosted feature flags and progressive rollouts for backend ap
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "CohortSwitch contributors" }]
+authors = [{ name = "Koncha Artyom" }]
 
 dependencies = [
   "alembic>=1.17,<2",

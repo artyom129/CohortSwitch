@@ -14,12 +14,27 @@ def _not_equals(actual: Any, expected: Any) -> bool:
     return actual is not MISSING and actual != expected
 
 
+def _is_collection(value: Any) -> bool:
+    # A string is a Container too, but "us" in "russia" is not list membership.
+    return isinstance(value, (list, tuple, set, frozenset))
+
+
 def _in(actual: Any, expected: Any) -> bool:
-    return actual is not MISSING and isinstance(expected, Container) and actual in expected
+    if actual is MISSING or not _is_collection(expected):
+        return False
+    try:
+        return actual in expected
+    except TypeError:
+        return False
 
 
 def _not_in(actual: Any, expected: Any) -> bool:
-    return actual is not MISSING and isinstance(expected, Container) and actual not in expected
+    if actual is MISSING or not _is_collection(expected):
+        return False
+    try:
+        return actual not in expected
+    except TypeError:
+        return False
 
 
 def _contains(actual: Any, expected: Any) -> bool:
